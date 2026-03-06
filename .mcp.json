@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "claude-test-server": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-c",
+        "cd /home/mnorth/test && claude mcp serve"
+      ],
+      "env": {}
+    }
+  }
+}
