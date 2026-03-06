@@ -295,7 +295,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
   console.log(`  1. Edit plugins/${pluginName}/POWER.md to describe your plugin`);
   console.log(`  2. Edit plugins/${pluginName}/GEMINI.md to describe your plugin for Gemini CLI users`);
   console.log(`  3. Edit plugins/${pluginName}/skills/${pluginName}/SKILL.md to define your skill`);
-  console.log(`  4. Run "pnpm run validate" to verify everything is in sync`);
+  console.log(`  4. Run "pnpm run build" to build hooks, validate, and generate standalone exports`);
 }
 
 function main(): void {

@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "validate": "tsx src/validate.ts",
+    "validate": "pnpm run build:hooks && tsx src/validate.ts",
     "scaffold": "tsx src/scaffold.ts",
     "build:standalone": "tsx src/build-standalone.ts",
     "typecheck": "tsc --noEmit",

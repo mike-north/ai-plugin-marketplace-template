@@ -117,6 +117,9 @@ function rewriteGeminiAgentTools(agentsDir: string): void {
             console.warn(`    ⚠ Agent ${file}: no Gemini equivalent for tool "${claudeTool}" — skipped`);
           }
         }
+        if (translatedLines.length === 0) {
+          return `${before}tools: []\n${after}`;
+        }
         return `${before}${toolsKey}${translatedLines.join("\n")}\n${after}`;
       },
     );

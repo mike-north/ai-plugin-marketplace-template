@@ -16,6 +16,8 @@ import {
   validateAgentFrontmatter,
   validateClaudeHooks,
   validateManifestFileRefs,
+  validateMarketplace,
+  validateMcpSync,
   validateNameConsistency,
   validatePluginFiles,
   validatePowerMdFrontmatter,
@@ -489,5 +491,172 @@ describe("validateReadme", () => {
     validateReadme(dir, "test-plugin", results);
 
     expect(results.failed.some((msg) => msg.includes("Missing README.md"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateMcpSync
+// ---------------------------------------------------------------------------
+
+describe("validateMcpSync", () => {
+  it("passes when .mcp.json and mcp.json have the same keys", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, ".mcp.json", JSON.stringify({ mcpServers: { "my-server": { command: "node" } } }));
+    writeFile(dir, "mcp.json", JSON.stringify({ mcpServers: { "my-server": { command: "node" } } }));
+
+    const results = freshResult();
+    validateMcpSync(dir, "test-plugin", results);
+
+    expect(results.failed).toEqual([]);
+    expect(results.passed.some((msg) => msg.includes("consistent mcpServers keys"))).toBe(true);
+  });
+
+  it("passes when both have empty mcpServers", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, ".mcp.json", JSON.stringify({ mcpServers: {} }));
+    writeFile(dir, "mcp.json", JSON.stringify({ mcpServers: {} }));
+
+    const results = freshResult();
+    validateMcpSync(dir, "test-plugin", results);
+
+    expect(results.failed).toEqual([]);
+    expect(results.passed.some((msg) => msg.includes("consistent"))).toBe(true);
+  });
+
+  it("fails when mcpServers keys differ", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, ".mcp.json", JSON.stringify({ mcpServers: { "server-a": { command: "node" } } }));
+    writeFile(dir, "mcp.json", JSON.stringify({ mcpServers: { "server-b": { command: "node" } } }));
+
+    const results = freshResult();
+    validateMcpSync(dir, "test-plugin", results);
+
+    expect(results.failed.some((msg) => msg.includes("key mismatch"))).toBe(true);
+  });
+
+  it("skips when one of the files is missing", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, ".mcp.json", JSON.stringify({ mcpServers: {} }));
+    // mcp.json missing
+
+    const results = freshResult();
+    validateMcpSync(dir, "test-plugin", results);
+
+    expect(results.failed).toEqual([]);
+    expect(results.passed).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateMarketplace
+// ---------------------------------------------------------------------------
+
+/**
+ * Helper to create a minimal valid marketplace JSON file.
+ */
+function writeMarketplace(
+  dir: string,
+  filename: string,
+  plugins: Array<{ name: string; source: string }>,
+): string {
+  const filePath = path.join(dir, filename);
+  const content = {
+    name: "test-marketplace",
+    owner: { name: "Test" },
+    plugins: plugins.map((p) => ({ ...p, description: "", tags: [] })),
+  };
+  writeFile(dir, filename, JSON.stringify(content));
+  return filePath;
+}
+
+describe("validateMarketplace", () => {
+  it("passes the listing check when plugin name and source both match in the same entry", () => {
+    const dir = makeTmpDir();
+    const mpPath = writeMarketplace(dir, "marketplace.json", [
+      { name: "my-plugin", source: "./plugins/my-plugin" },
+    ]);
+
+    const results = freshResult();
+    validateMarketplace(mpPath, ["my-plugin"], "marketplace.json", results);
+
+    // The listing check should pass (name + source match in one entry).
+    // The source existence check may fail since ROOT isn't our temp dir — that's fine.
+    expect(results.passed.some((msg) => msg.includes("lists plugin: my-plugin"))).toBe(true);
+    expect(results.failed.every((msg) => !msg.includes("missing plugin"))).toBe(true);
+  });
+
+  it("fails when name matches one entry but source matches a different entry", () => {
+    const dir = makeTmpDir();
+    fs.mkdirSync(path.join(dir, "plugins", "alpha"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "plugins", "beta"), { recursive: true });
+    // Name "alpha" appears in one entry, source "plugins/alpha" appears in another
+    const mpPath = writeMarketplace(dir, "marketplace.json", [
+      { name: "alpha", source: "./plugins/beta" },
+      { name: "beta", source: "./plugins/alpha" },
+    ]);
+
+    const results = freshResult();
+    validateMarketplace(mpPath, ["alpha"], "marketplace.json", results);
+
+    expect(results.failed.some((msg) => msg.includes("missing plugin: alpha"))).toBe(true);
+  });
+
+  it("fails when plugin is not listed at all", () => {
+    const dir = makeTmpDir();
+    const mpPath = writeMarketplace(dir, "marketplace.json", []);
+
+    const results = freshResult();
+    validateMarketplace(mpPath, ["my-plugin"], "marketplace.json", results);
+
+    expect(results.failed.some((msg) => msg.includes("missing plugin: my-plugin"))).toBe(true);
+  });
+
+  it("fails when marketplace file is missing", () => {
+    const dir = makeTmpDir();
+
+    const results = freshResult();
+    validateMarketplace(path.join(dir, "nonexistent.json"), ["my-plugin"], "marketplace.json", results);
+
+    expect(results.failed.some((msg) => msg.includes("Missing"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateManifestFileRefs — path validation
+// ---------------------------------------------------------------------------
+
+describe("validateManifestFileRefs path validation", () => {
+  it("fails when a path does not start with ./", () => {
+    const dir = makeTmpDir();
+    writeFile(
+      dir,
+      ".claude-plugin/plugin.json",
+      JSON.stringify({
+        name: "test",
+        skills: ["skills/no-dot-slash"],
+      }),
+    );
+
+    const results = freshResult();
+    validateManifestFileRefs(dir, "test-plugin", results);
+
+    expect(results.failed.some((msg) => msg.includes('must start with "./"'))).toBe(true);
+  });
+
+  it("fails when a path contains ..", () => {
+    const dir = makeTmpDir();
+    writeFile(
+      dir,
+      ".claude-plugin/plugin.json",
+      JSON.stringify({
+        name: "test",
+        agents: ["./../escape/agent.md"],
+      }),
+    );
+
+    const results = freshResult();
+    validateManifestFileRefs(dir, "test-plugin", results);
+
+    expect(results.failed.some((msg) => msg.includes('must not contain ".."'))).toBe(true);
   });
 });

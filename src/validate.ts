@@ -302,19 +302,15 @@ export function validateMarketplace(
   }
 
   const plugins = marketplace.plugins;
-  const listedNames = new Set(plugins.map((p) => p.name));
 
-  // Build a set of normalized source paths (without leading "./") for lookup
-  const listedSources = new Set(
-    plugins
-      .map((p) => resolveMarketplaceSource(p.source))
-      .filter((s): s is string => s !== undefined),
-  );
-
-  // Check every plugin directory is listed. Both source and name must match.
+  // Check every plugin directory is listed. A single entry must match both name and source.
   for (const pluginName of pluginNames) {
     const expectedPath = `plugins/${pluginName}`;
-    if (listedSources.has(expectedPath) && listedNames.has(pluginName)) {
+    const found = plugins.some((entry) => {
+      const resolved = resolveMarketplaceSource(entry.source);
+      return entry.name === pluginName && resolved === expectedPath;
+    });
+    if (found) {
       pass(results, `[marketplace] ${label} lists plugin: ${pluginName}`);
     } else {
       fail(results, `[marketplace] ${label} is missing plugin: ${pluginName}`);
@@ -471,8 +467,18 @@ export function validateManifestFileRefs(pluginDir: string, pluginName: string, 
     let allRefsValid = true;
     for (const { field, paths: refPaths } of refGroups) {
       for (const refPath of refPaths) {
-        // Strip leading "./" for path.join — the manifest paths must start with "./"
-        const normalized = refPath.startsWith("./") ? refPath.slice(2) : refPath;
+        // All manifest paths must start with "./" and must not contain ".." segments
+        if (!refPath.startsWith("./")) {
+          fail(results, `[${pluginName}] ${label} ${field} path must start with "./": ${refPath}`);
+          allRefsValid = false;
+          continue;
+        }
+        if (refPath.includes("..")) {
+          fail(results, `[${pluginName}] ${label} ${field} path must not contain "..": ${refPath}`);
+          allRefsValid = false;
+          continue;
+        }
+        const normalized = refPath.slice(2);
         const resolvedPath = path.join(pluginDir, normalized);
         if (!fs.existsSync(resolvedPath)) {
           fail(results, `[${pluginName}] ${label} ${field} references non-existent path: ${refPath}`);
