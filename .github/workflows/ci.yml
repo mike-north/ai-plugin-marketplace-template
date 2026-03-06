@@ -41,3 +41,11 @@ jobs:
 
       - name: Build standalone exports
         run: pnpm run build:standalone
+
+      - name: Verify dist/ is up to date
+        run: |
+          if [ -n "$(git status --porcelain -- dist/)" ]; then
+            echo "::error::dist/ is out of date. Run 'pnpm run build' and commit the changes."
+            git status -- dist/
+            exit 1
+          fi

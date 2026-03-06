@@ -80,7 +80,6 @@ out
 
 # Nuxt.js build / generate output
 .nuxt
-dist
 .output
 
 # Gatsby files
@@ -147,7 +146,6 @@ vite.config.ts.timestamp-*
 .claude/**/*.local.*
 *.local.*
 
-# Build output
-dist/
+# Build output (dist/ is committed for consumer install — see .gitattributes)
 dist-ts/
 plugins/*/hooks/*.json
