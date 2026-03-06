@@ -41,3 +41,11 @@ jobs:
 
       - name: Build standalone exports
         run: pnpm run build:standalone
+
+      - name: Verify dist/ is up to date
+        run: |
+          if [ -n "$(git diff --name-only dist/)" ]; then
+            echo "::error::dist/ is out of date. Run 'pnpm run build' and commit the changes."
+            git diff --stat dist/
+            exit 1
+          fi
