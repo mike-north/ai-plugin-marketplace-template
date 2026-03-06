@@ -136,4 +136,4 @@ If you prefer to create a plugin without the scaffold script:
 
 ## License
 
-ISC
+MIT
