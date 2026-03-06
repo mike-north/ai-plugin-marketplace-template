@@ -278,6 +278,61 @@ function buildKiroStandalone(pluginDir: string, destDir: string): string[] {
   return copied;
 }
 
+/**
+ * Generates a merged Gemini extension at dist/gemini/ root, combining
+ * all plugins' skills, agents, and commands into a single installable extension.
+ */
+function buildMergedGemini(plugins: string[]): void {
+  const mergedDir = path.join(DIST_DIR, "gemini");
+
+  const manifest = {
+    name: "ai-plugin-marketplace",
+    version: "0.0.1",
+    description: "AI plugin marketplace — skills and agents for multiple platforms",
+  };
+  fs.writeFileSync(path.join(mergedDir, "gemini-extension.json"), JSON.stringify(manifest, null, 2) + "\n");
+
+  const geminiMdParts: string[] = ["# AI Plugin Marketplace\n"];
+  for (const plugin of plugins) {
+    const geminiMd = path.join(PLUGINS_DIR, plugin, "GEMINI.md");
+    if (fs.existsSync(geminiMd)) {
+      geminiMdParts.push(fs.readFileSync(geminiMd, "utf-8"));
+    }
+  }
+  fs.writeFileSync(path.join(mergedDir, "GEMINI.md"), geminiMdParts.join("\n"));
+
+  // Copy from each per-plugin export (which already has translated tool names)
+  for (const plugin of plugins) {
+    const pluginExport = path.join(mergedDir, plugin);
+    for (const subdir of ["skills", "agents", "commands"]) {
+      const src = path.join(pluginExport, subdir);
+      if (fs.existsSync(src)) copyDir(src, path.join(mergedDir, subdir));
+    }
+  }
+
+  console.log("  Merged Gemini extension at dist/gemini/");
+}
+
+/**
+ * Generates a merged .kiro/agents/ at dist/kiro/ root, combining
+ * all plugins' Kiro agent configs for discovery from a single directory.
+ */
+function buildMergedKiro(plugins: string[]): void {
+  const mergedAgentsDir = path.join(DIST_DIR, "kiro", ".kiro", "agents");
+  fs.mkdirSync(mergedAgentsDir, { recursive: true });
+
+  for (const plugin of plugins) {
+    const pluginAgents = path.join(DIST_DIR, "kiro", plugin, ".kiro", "agents");
+    if (!fs.existsSync(pluginAgents)) continue;
+    for (const file of fs.readdirSync(pluginAgents)) {
+      if (!file.endsWith(".json")) continue;
+      copyFile(path.join(pluginAgents, file), path.join(mergedAgentsDir, file));
+    }
+  }
+
+  console.log("  Merged Kiro agents at dist/kiro/.kiro/agents/");
+}
+
 function buildAll(): void {
   if (!fs.existsSync(PLUGINS_DIR)) {
     console.error(`plugins/ directory not found at ${PLUGINS_DIR}`);
@@ -324,6 +379,12 @@ function buildAll(): void {
   }
 
   console.log(`Generated ${results.length} plugin(s) × 2 platforms = ${results.length * 2} standalone exports.`);
+
+  // Generate merged exports for easy install from a single directory
+  console.log("\nMerged exports:");
+  const pluginNames = plugins;
+  buildMergedGemini(pluginNames);
+  buildMergedKiro(pluginNames);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
