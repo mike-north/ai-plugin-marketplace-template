@@ -15,6 +15,9 @@ import {
   resolveMarketplaceSource,
   validateAgentFrontmatter,
   validateClaudeHooks,
+  validateCodexManifest,
+  validateCodexMarketplace,
+  validateGeminiExtension,
   validateManifestFileRefs,
   validateMarketplace,
   validateMcpSync,
@@ -624,6 +627,336 @@ describe("validateMarketplace", () => {
 // ---------------------------------------------------------------------------
 // validateManifestFileRefs — path validation
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// validateCodexManifest
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal valid Codex plugin.json payload — used as a starting point for negative-path tests.
+ */
+function baseCodexManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    name: "test-plugin",
+    version: "0.0.1",
+    description: "Test",
+    skills: "./skills",
+    mcpServers: "./.mcp.json",
+    interface: {
+      displayName: "Test Plugin",
+      shortDescription: "A test plugin",
+    },
+    ...overrides,
+  };
+}
+
+describe("validateCodexManifest", () => {
+  it("passes for a valid manifest with existing paths", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, "skills/test-skill/SKILL.md", "---\nname: test-skill\n---\n");
+    writeFile(dir, ".mcp.json", JSON.stringify({ mcpServers: {} }));
+    writeFile(
+      dir,
+      ".codex-plugin/plugin.json",
+      JSON.stringify(baseCodexManifest()),
+    );
+
+    const results = freshResult();
+    validateCodexManifest(dir, "test-plugin", results);
+
+    expect(results.failed).toEqual([]);
+    expect(results.passed.some((m) => m.includes("interface has required fields"))).toBe(true);
+    expect(results.passed.some((m) => m.includes("paths resolve"))).toBe(true);
+  });
+
+  it("skips deep checks when the manifest file is absent", () => {
+    const dir = makeTmpDir();
+    const results = freshResult();
+    validateCodexManifest(dir, "test-plugin", results);
+
+    expect(results.failed).toEqual([]);
+    expect(results.passed).toEqual([]);
+  });
+
+  it("fails when a required top-level field is missing", () => {
+    const dir = makeTmpDir();
+    writeFile(
+      dir,
+      ".codex-plugin/plugin.json",
+      JSON.stringify({
+        name: "test-plugin",
+        version: "0.0.1",
+        interface: { displayName: "X", shortDescription: "Y" },
+      }),
+    );
+
+    const results = freshResult();
+    validateCodexManifest(dir, "test-plugin", results);
+
+    expect(results.failed.some((m) => m.includes("schema errors") && m.includes("description"))).toBe(true);
+  });
+
+  it("fails when interface.displayName is empty", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, "skills/.gitkeep", "");
+    writeFile(dir, ".mcp.json", JSON.stringify({ mcpServers: {} }));
+    writeFile(
+      dir,
+      ".codex-plugin/plugin.json",
+      JSON.stringify(
+        baseCodexManifest({
+          interface: { displayName: "", shortDescription: "ok" },
+        }),
+      ),
+    );
+
+    const results = freshResult();
+    validateCodexManifest(dir, "test-plugin", results);
+
+    expect(results.failed.some((m) => m.includes("displayName"))).toBe(true);
+  });
+
+  it("fails when interface.shortDescription is missing", () => {
+    const dir = makeTmpDir();
+    writeFile(
+      dir,
+      ".codex-plugin/plugin.json",
+      JSON.stringify(
+        baseCodexManifest({
+          interface: { displayName: "OK" },
+        }),
+      ),
+    );
+
+    const results = freshResult();
+    validateCodexManifest(dir, "test-plugin", results);
+
+    expect(results.failed.some((m) => m.includes("shortDescription"))).toBe(true);
+  });
+
+  it("fails when a path field is not ./-prefixed", () => {
+    const dir = makeTmpDir();
+    writeFile(
+      dir,
+      ".codex-plugin/plugin.json",
+      JSON.stringify(
+        baseCodexManifest({
+          skills: "skills",
+        }),
+      ),
+    );
+
+    const results = freshResult();
+    validateCodexManifest(dir, "test-plugin", results);
+
+    expect(results.failed.some((m) => m.includes('must start with "./"'))).toBe(true);
+  });
+
+  it("fails when a referenced skills directory does not exist", () => {
+    const dir = makeTmpDir();
+    writeFile(
+      dir,
+      ".codex-plugin/plugin.json",
+      JSON.stringify(
+        baseCodexManifest({
+          skills: "./skills-missing",
+        }),
+      ),
+    );
+
+    const results = freshResult();
+    validateCodexManifest(dir, "test-plugin", results);
+
+    expect(
+      results.failed.some(
+        (m) => m.includes("non-existent path") && m.includes("./skills-missing"),
+      ),
+    ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateCodexMarketplace
+// ---------------------------------------------------------------------------
+
+/**
+ * Writes a Codex-shaped marketplace JSON to the given directory and returns the full path.
+ */
+function writeCodexMarketplace(
+  dir: string,
+  filename: string,
+  plugins: Array<Record<string, unknown>>,
+): string {
+  const content = {
+    name: "test-marketplace",
+    owner: { name: "Test" },
+    plugins,
+  };
+  writeFile(dir, filename, JSON.stringify(content));
+  return path.join(dir, filename);
+}
+
+describe("validateCodexMarketplace", () => {
+  it("passes when a plugin is listed with the expected source and policy", () => {
+    const dir = makeTmpDir();
+    // Create the plugin directory under ROOT — codex validator resolves ./plugins/<name> against ROOT,
+    // so we can't easily satisfy that from a tmp dir. The listing+policy checks still run before the
+    // path existence check, and expectation here is only that listing passes even when ROOT path doesn't match.
+    const mpPath = writeCodexMarketplace(dir, "marketplace.json", [
+      {
+        name: "skill-evaluator",
+        source: { source: "local", path: "./plugins/skill-evaluator" },
+        description: "",
+        tags: [],
+        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+      },
+    ]);
+
+    const results = freshResult();
+    validateCodexMarketplace(mpPath, ["skill-evaluator"], "marketplace.json", results);
+
+    // Either the path-existence check succeeds (if ROOT/plugins/skill-evaluator exists from the worktree)
+    // or it fails with a specific message — policy and listing checks should NOT fail either way.
+    expect(results.failed.every((m) => !m.includes("must use source.source"))).toBe(true);
+    expect(results.failed.every((m) => !m.includes("expected source.path"))).toBe(true);
+    expect(results.failed.every((m) => !m.includes("should declare policy"))).toBe(true);
+    expect(results.failed.every((m) => !m.includes("is missing plugin"))).toBe(true);
+  });
+
+  it("fails when plugin is missing from the marketplace", () => {
+    const dir = makeTmpDir();
+    const mpPath = writeCodexMarketplace(dir, "marketplace.json", []);
+
+    const results = freshResult();
+    validateCodexMarketplace(mpPath, ["skill-evaluator"], "marketplace.json", results);
+
+    expect(results.failed.some((m) => m.includes("missing plugin: skill-evaluator"))).toBe(true);
+  });
+
+  it("fails when source.path does not match expected ./plugins/<name>", () => {
+    const dir = makeTmpDir();
+    const mpPath = writeCodexMarketplace(dir, "marketplace.json", [
+      {
+        name: "foo",
+        source: { source: "local", path: "./somewhere/foo" },
+        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+      },
+    ]);
+
+    const results = freshResult();
+    validateCodexMarketplace(mpPath, ["foo"], "marketplace.json", results);
+
+    expect(results.failed.some((m) => m.includes("expected source.path"))).toBe(true);
+  });
+
+  it("fails when policy is missing or wrong", () => {
+    const dir = makeTmpDir();
+    const mpPath = writeCodexMarketplace(dir, "marketplace.json", [
+      {
+        name: "foo",
+        source: { source: "local", path: "./plugins/foo" },
+        // policy intentionally absent
+      },
+    ]);
+
+    const results = freshResult();
+    validateCodexMarketplace(mpPath, ["foo"], "marketplace.json", results);
+
+    expect(results.failed.some((m) => m.includes("should declare policy"))).toBe(true);
+  });
+
+  it("fails when the marketplace file is missing", () => {
+    const dir = makeTmpDir();
+    const results = freshResult();
+    validateCodexMarketplace(path.join(dir, "nonexistent.json"), ["foo"], "marketplace.json", results);
+
+    expect(results.failed.some((m) => m.includes("Missing"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateGeminiExtension
+// ---------------------------------------------------------------------------
+
+describe("validateGeminiExtension", () => {
+  it("passes when all referenced components exist on disk", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, "gemini-extension.json", JSON.stringify({
+      name: "test",
+      contextFileName: "GEMINI.md",
+    }));
+    writeFile(dir, "GEMINI.md", "# context");
+    writeFile(dir, "skills/.gitkeep", "");
+    writeFile(dir, "commands/evaluate.toml", 'description = "x"\nprompt = "y"');
+    writeFile(dir, "agents/foo.md", "---\nname: foo\ndescription: bar\n---\n# Foo");
+
+    const results = freshResult();
+    validateGeminiExtension(dir, "test-plugin", results);
+
+    expect(results.failed).toEqual([]);
+    expect(results.passed.some((m) => m.includes("cross-references are valid"))).toBe(true);
+  });
+
+  it("fails when contextFileName points to a missing file", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, "gemini-extension.json", JSON.stringify({
+      name: "test",
+      contextFileName: "MISSING.md",
+    }));
+    writeFile(dir, "skills/.gitkeep", "");
+
+    const results = freshResult();
+    validateGeminiExtension(dir, "test-plugin", results);
+
+    expect(results.failed.some((m) => m.includes("contextFileName") && m.includes("MISSING.md"))).toBe(true);
+  });
+
+  it("fails when a command TOML is missing required keys", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, "gemini-extension.json", JSON.stringify({ name: "test" }));
+    writeFile(dir, "skills/.gitkeep", "");
+    writeFile(dir, "commands/bad.toml", "# no description or prompt");
+
+    const results = freshResult();
+    validateGeminiExtension(dir, "test-plugin", results);
+
+    expect(results.failed.some((m) => m.includes("commands/bad.toml"))).toBe(true);
+  });
+
+  it("fails when an agent md is missing name/description frontmatter", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, "gemini-extension.json", JSON.stringify({ name: "test" }));
+    writeFile(dir, "skills/.gitkeep", "");
+    writeFile(dir, "agents/broken.md", "---\nname: broken\n---\n# no description");
+
+    const results = freshResult();
+    validateGeminiExtension(dir, "test-plugin", results);
+
+    expect(results.failed.some((m) => m.includes("agents/broken.md"))).toBe(true);
+  });
+
+  it("fails when skills/ directory is missing", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, "gemini-extension.json", JSON.stringify({ name: "test" }));
+
+    const results = freshResult();
+    validateGeminiExtension(dir, "test-plugin", results);
+
+    expect(results.failed.some((m) => m.includes("skills/"))).toBe(true);
+  });
+
+  it("fails when hooks/hooks.json is malformed", () => {
+    const dir = makeTmpDir();
+    writeFile(dir, "gemini-extension.json", JSON.stringify({ name: "test" }));
+    writeFile(dir, "skills/.gitkeep", "");
+    writeFile(dir, "hooks/hooks.json", "{ not valid json");
+
+    const results = freshResult();
+    validateGeminiExtension(dir, "test-plugin", results);
+
+    expect(results.failed.some((m) => m.includes("hooks.json"))).toBe(true);
+  });
+});
 
 describe("validateManifestFileRefs path validation", () => {
   it("fails when a path does not start with ./", () => {
