@@ -18,6 +18,7 @@ const PLUGINS_DIR = path.join(ROOT, "plugins");
 const TEMPLATES_DIR = path.join(ROOT, "templates");
 const CLAUDE_MARKETPLACE = path.join(ROOT, ".claude-plugin", "marketplace.json");
 const CURSOR_MARKETPLACE = path.join(ROOT, ".cursor-plugin", "marketplace.json");
+const CODEX_MARKETPLACE = path.join(ROOT, ".agents", "plugins", "marketplace.json");
 
 interface TemplateVars {
   name: string;
@@ -76,6 +77,14 @@ interface MarketplaceEntry {
   tags: string[];
 }
 
+interface CodexMarketplaceEntry {
+  name: string;
+  source: { source: "local"; path: string };
+  description: string;
+  tags: string[];
+  policy: { installation: "AVAILABLE"; authentication: "ON_INSTALL" };
+}
+
 interface MarketplaceJson {
   name?: string;
   owner?: MarketplaceOwner;
@@ -85,6 +94,17 @@ interface MarketplaceJson {
     pluginRoot?: string;
   };
   plugins?: MarketplaceEntry[];
+  [key: string]: unknown;
+}
+
+interface CodexMarketplaceJson {
+  name?: string;
+  owner?: MarketplaceOwner;
+  metadata?: {
+    version?: string;
+    description?: string;
+  };
+  plugins?: CodexMarketplaceEntry[];
   [key: string]: unknown;
 }
 
@@ -102,6 +122,28 @@ function updateMarketplace(marketplacePath: string, entry: MarketplaceEntry): vo
 
   // Check for duplicate
   const exists = marketplace.plugins.some((p) => p.name === entry.name || p.source === entry.source);
+  if (!exists) {
+    marketplace.plugins.push(entry);
+  }
+
+  fs.writeFileSync(marketplacePath, JSON.stringify(marketplace, null, 2) + "\n", "utf-8");
+}
+
+function updateCodexMarketplace(marketplacePath: string, entry: CodexMarketplaceEntry): void {
+  if (!fs.existsSync(marketplacePath)) {
+    throw new Error(`Marketplace file not found: ${marketplacePath}`);
+  }
+
+  const content = fs.readFileSync(marketplacePath, "utf-8");
+  const marketplace = JSON.parse(content) as CodexMarketplaceJson;
+
+  if (!Array.isArray(marketplace.plugins)) {
+    marketplace.plugins = [];
+  }
+
+  const exists = marketplace.plugins.some(
+    (p) => p.name === entry.name || p.source.path === entry.source.path,
+  );
   if (!exists) {
     marketplace.plugins.push(entry);
   }
@@ -157,6 +199,13 @@ function scaffoldPlugin(pluginName: string): void {
   writeFile(
     path.join(pluginDir, ".cursor-plugin", "plugin.json"),
     applyTemplate(readTemplate("cursor-plugin.json.tmpl"), vars),
+    createdFiles,
+  );
+
+  // .codex-plugin/plugin.json
+  writeFile(
+    path.join(pluginDir, ".codex-plugin", "plugin.json"),
+    applyTemplate(readTemplate("codex-plugin.json.tmpl"), vars),
     createdFiles,
   );
 
@@ -281,6 +330,15 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
   updateMarketplace(CLAUDE_MARKETPLACE, marketplaceEntry);
   updateMarketplace(CURSOR_MARKETPLACE, marketplaceEntry);
+
+  const codexMarketplaceEntry: CodexMarketplaceEntry = {
+    name: pluginName,
+    source: { source: "local", path: `./plugins/${pluginName}` },
+    description: vars.description,
+    tags: [],
+    policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+  };
+  updateCodexMarketplace(CODEX_MARKETPLACE, codexMarketplaceEntry);
   console.log(`Updated marketplace manifests.`);
 
   // Print summary

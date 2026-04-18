@@ -26,10 +26,12 @@ const ROOT = path.resolve(__dirname, "..");
 const PLUGINS_DIR = path.join(ROOT, "plugins");
 const CLAUDE_MARKETPLACE = path.join(ROOT, ".claude-plugin", "marketplace.json");
 const CURSOR_MARKETPLACE = path.join(ROOT, ".cursor-plugin", "marketplace.json");
+const CODEX_MARKETPLACE = path.join(ROOT, ".agents", "plugins", "marketplace.json");
 
 export const REQUIRED_FILES = [
   ".claude-plugin/plugin.json",
   ".cursor-plugin/plugin.json",
+  ".codex-plugin/plugin.json",
   "gemini-extension.json",
   "POWER.md",
   "GEMINI.md",
@@ -167,6 +169,16 @@ export function validateNameConsistency(pluginDir: string, pluginName: string, r
       names[".cursor-plugin/plugin.json"] = json.name;
     } catch {
       fail(results, `[${pluginName}] Failed to parse .cursor-plugin/plugin.json`);
+    }
+  }
+
+  const codexPluginPath = path.join(pluginDir, ".codex-plugin", "plugin.json");
+  if (fileExists(codexPluginPath)) {
+    try {
+      const json = PluginJsonSchema.parse(readJson(codexPluginPath));
+      names[".codex-plugin/plugin.json"] = json.name;
+    } catch {
+      fail(results, `[${pluginName}] Failed to parse .codex-plugin/plugin.json`);
     }
   }
 
@@ -558,6 +570,319 @@ export function validateClaudeHooks(pluginDir: string, pluginName: string, resul
   }
 }
 
+/**
+ * Schema for the Codex plugin manifest (.codex-plugin/plugin.json).
+ * Mirrors schemas/codex-plugin.json. `skills`, `mcpServers`, and `apps` are
+ * string paths (unlike Claude's skills/agents which can also be arrays).
+ */
+const CodexInterfaceSchema = z.object({
+  displayName: z.string().min(1),
+  shortDescription: z.string().min(1),
+  longDescription: z.string().optional(),
+  category: z.string().optional(),
+  capabilities: z.array(z.string()).optional(),
+  brandColor: z.string().optional(),
+  composerIcon: z.string().optional(),
+  logo: z.string().optional(),
+  screenshots: z.array(z.string()).optional(),
+  defaultPrompt: z.string().optional(),
+  websiteURL: z.string().optional(),
+  privacyPolicyURL: z.string().optional(),
+  termsOfServiceURL: z.string().optional(),
+}).loose();
+
+const CodexPluginManifestSchema = z.object({
+  name: z.string(),
+  version: z.string(),
+  description: z.string(),
+  author: z.object({
+    name: z.string(),
+    email: z.string().optional(),
+    url: z.string().optional(),
+  }).loose().optional(),
+  homepage: z.string().optional(),
+  repository: z.string().optional(),
+  license: z.string().optional(),
+  keywords: z.array(z.string()).optional(),
+  skills: z.string().optional(),
+  mcpServers: z.string().optional(),
+  apps: z.string().optional(),
+  interface: CodexInterfaceSchema,
+}).loose();
+
+/**
+ * Required fields on the Codex interface object — these must be non-empty
+ * even when the rest of the interface block is minimally populated.
+ */
+const CODEX_INTERFACE_REQUIRED: readonly (keyof z.infer<typeof CodexInterfaceSchema>)[] = [
+  "displayName",
+  "shortDescription",
+];
+
+export function validateCodexManifest(pluginDir: string, pluginName: string, results: ValidationResult): void {
+  const codexPath = path.join(pluginDir, ".codex-plugin", "plugin.json");
+  if (!fileExists(codexPath)) {
+    // Missing file already reported by validatePluginFiles — skip deeper checks.
+    return;
+  }
+
+  const parseResult = CodexPluginManifestSchema.safeParse(readJson(codexPath));
+  if (!parseResult.success) {
+    const messages = parseResult.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+    fail(results, `[${pluginName}] .codex-plugin/plugin.json schema errors: ${messages.join("; ")}`);
+    return;
+  }
+  const manifest = parseResult.data;
+
+  // Required interface fields
+  let interfaceValid = true;
+  for (const field of CODEX_INTERFACE_REQUIRED) {
+    const value = manifest.interface[field];
+    if (typeof value !== "string" || value.length === 0) {
+      fail(results, `[${pluginName}] .codex-plugin/plugin.json interface.${field} is required and must be a non-empty string`);
+      interfaceValid = false;
+    }
+  }
+  if (interfaceValid) {
+    pass(results, `[${pluginName}] .codex-plugin/plugin.json interface has required fields`);
+  }
+
+  // Path fields must start with "./" and referenced files/dirs must exist.
+  const pathFields: { field: "skills" | "mcpServers" | "apps"; kind: "dir" | "file" }[] = [
+    { field: "skills", kind: "dir" },
+    { field: "mcpServers", kind: "file" },
+    { field: "apps", kind: "file" },
+  ];
+
+  let allPathsValid = true;
+  for (const { field, kind } of pathFields) {
+    const value = manifest[field];
+    if (value === undefined) continue;
+    if (!value.startsWith("./")) {
+      fail(results, `[${pluginName}] .codex-plugin/plugin.json ${field} path must start with "./": ${value}`);
+      allPathsValid = false;
+      continue;
+    }
+    if (value.includes("..")) {
+      fail(results, `[${pluginName}] .codex-plugin/plugin.json ${field} path must not contain "..": ${value}`);
+      allPathsValid = false;
+      continue;
+    }
+    const resolved = path.join(pluginDir, value.slice(2));
+    if (!fs.existsSync(resolved)) {
+      fail(results, `[${pluginName}] .codex-plugin/plugin.json ${field} references non-existent path: ${value}`);
+      allPathsValid = false;
+      continue;
+    }
+    const stat = fs.statSync(resolved);
+    if (kind === "dir" && !stat.isDirectory()) {
+      fail(results, `[${pluginName}] .codex-plugin/plugin.json ${field} must reference a directory: ${value}`);
+      allPathsValid = false;
+    } else if (kind === "file" && !stat.isFile()) {
+      fail(results, `[${pluginName}] .codex-plugin/plugin.json ${field} must reference a file: ${value}`);
+      allPathsValid = false;
+    }
+  }
+
+  // MCP cross-reference: if `mcpServers` points at a file, sanity-check that it parses.
+  if (manifest.mcpServers !== undefined) {
+    const mcpResolved = path.join(pluginDir, manifest.mcpServers.replace(/^\.\//, ""));
+    if (fs.existsSync(mcpResolved)) {
+      try {
+        McpJsonSchema.parse(readJson(mcpResolved));
+      } catch {
+        fail(results, `[${pluginName}] .codex-plugin/plugin.json mcpServers points to a file that is not a valid MCP config: ${manifest.mcpServers}`);
+        allPathsValid = false;
+      }
+    }
+  }
+
+  if (allPathsValid) {
+    pass(results, `[${pluginName}] .codex-plugin/plugin.json paths resolve to real files/directories`);
+  }
+}
+
+const CodexMarketplaceEntrySchema = z.object({
+  name: z.string(),
+  source: z.object({
+    source: z.literal("local"),
+    path: z.string(),
+  }).loose(),
+  description: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+  policy: z.object({
+    installation: z.string().optional(),
+    authentication: z.string().optional(),
+  }).loose().optional(),
+}).loose();
+
+const CodexMarketplaceJsonSchema = z.object({
+  name: z.string().optional(),
+  owner: MarketplaceOwnerSchema.optional(),
+  metadata: z.object({
+    version: z.string().optional(),
+    description: z.string().optional(),
+  }).loose().optional(),
+  plugins: z.array(CodexMarketplaceEntrySchema),
+}).loose();
+
+export function validateCodexMarketplace(
+  marketplacePath: string,
+  pluginNames: string[],
+  label: string,
+  results: ValidationResult,
+): void {
+  if (!fileExists(marketplacePath)) {
+    fail(results, `[marketplace] Missing ${label}`);
+    return;
+  }
+
+  const parseResult = CodexMarketplaceJsonSchema.safeParse(readJson(marketplacePath));
+  if (!parseResult.success) {
+    const messages = parseResult.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+    fail(results, `[marketplace] Failed to parse ${label}: ${messages.join("; ")}`);
+    return;
+  }
+  const marketplace = parseResult.data;
+
+  for (const pluginName of pluginNames) {
+    const expectedPath = `./plugins/${pluginName}`;
+    const entry = marketplace.plugins.find((e) => e.name === pluginName);
+    if (!entry) {
+      fail(results, `[marketplace] ${label} is missing plugin: ${pluginName}`);
+      continue;
+    }
+    if (entry.source.path !== expectedPath) {
+      fail(results, `[marketplace] ${label} plugin "${pluginName}" expected source.path "${expectedPath}", got "${entry.source.path}"`);
+      continue;
+    }
+    if (entry.policy?.installation !== "AVAILABLE" || entry.policy.authentication !== "ON_INSTALL") {
+      fail(results, `[marketplace] ${label} plugin "${pluginName}" should declare policy { installation: "AVAILABLE", authentication: "ON_INSTALL" }`);
+      continue;
+    }
+    const resolvedPath = path.join(ROOT, entry.source.path.replace(/^\.\//, ""));
+    if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isDirectory()) {
+      fail(results, `[marketplace] ${label} plugin "${pluginName}" source.path does not exist or is not a directory: ${entry.source.path}`);
+      continue;
+    }
+    pass(results, `[marketplace] ${label} lists plugin: ${pluginName}`);
+  }
+}
+
+/**
+ * Schema for the Gemini CLI extension manifest (gemini-extension.json).
+ * Per geminicli.com/docs/extensions/reference: supports name/version/description
+ * plus mcpServers, contextFileName, excludeTools, and settings.
+ */
+const GeminiExtensionManifestSchema = z.object({
+  name: z.string(),
+  version: z.string().optional(),
+  description: z.string().optional(),
+  contextFileName: z.string().optional(),
+  excludeTools: z.array(z.string()).optional(),
+  settings: z.record(z.string(), z.unknown()).optional(),
+  mcpServers: z.record(z.string(), z.object({
+    command: z.string().optional(),
+    args: z.array(z.string()).optional(),
+    env: z.record(z.string(), z.string()).optional(),
+    url: z.string().optional(),
+  }).loose()).optional(),
+}).loose();
+
+/**
+ * Validate that the Gemini extension manifest cross-references (contextFileName,
+ * referenced command/agent/hook/skill directories) actually exist on disk.
+ *
+ * Gemini CLI auto-discovers the `commands/`, `agents/`, `hooks/`, and `skills/`
+ * directories next to the manifest — we verify that directories advertised in
+ * the manifest (or auto-discovered on disk) contain syntactically valid files.
+ */
+export function validateGeminiExtension(pluginDir: string, pluginName: string, results: ValidationResult): void {
+  const geminiPath = path.join(pluginDir, "gemini-extension.json");
+  if (!fileExists(geminiPath)) return;
+
+  const parseResult = GeminiExtensionManifestSchema.safeParse(readJson(geminiPath));
+  if (!parseResult.success) {
+    const messages = parseResult.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+    fail(results, `[${pluginName}] gemini-extension.json schema errors: ${messages.join("; ")}`);
+    return;
+  }
+  const manifest = parseResult.data;
+
+  let allValid = true;
+
+  // contextFileName: if declared, the file must exist on disk.
+  if (manifest.contextFileName !== undefined) {
+    const ctxPath = path.join(pluginDir, manifest.contextFileName);
+    if (!fs.existsSync(ctxPath) || !fs.statSync(ctxPath).isFile()) {
+      fail(results, `[${pluginName}] gemini-extension.json contextFileName references missing file: ${manifest.contextFileName}`);
+      allValid = false;
+    }
+  }
+
+  // Auto-discovered components — if the dir exists, spot-check files are syntactically
+  // reasonable. If the dir is missing AND referenced by disk, fine; we don't demand
+  // every plugin have every component.
+  const commandsDir = path.join(pluginDir, "commands");
+  if (fs.existsSync(commandsDir) && fs.statSync(commandsDir).isDirectory()) {
+    const tomlFiles = fs.readdirSync(commandsDir).filter((f) => f.endsWith(".toml"));
+    if (tomlFiles.length === 0) {
+      // No .toml is fine — Gemini simply has no commands to load.
+    } else {
+      for (const f of tomlFiles) {
+        const content = fs.readFileSync(path.join(commandsDir, f), "utf-8");
+        if (!/^\s*(description|prompt)\s*=/m.test(content)) {
+          fail(results, `[${pluginName}] gemini commands/${f} is missing required TOML keys (description or prompt)`);
+          allValid = false;
+        }
+      }
+    }
+  }
+
+  const agentsDir = path.join(pluginDir, "agents");
+  if (fs.existsSync(agentsDir) && fs.statSync(agentsDir).isDirectory()) {
+    const mdFiles = fs.readdirSync(agentsDir).filter((f) => f.endsWith(".md"));
+    for (const f of mdFiles) {
+      const content = fs.readFileSync(path.join(agentsDir, f), "utf-8");
+      const name = parseFrontmatterField(content, "name");
+      const description = parseFrontmatterField(content, "description");
+      if (name === undefined || description === undefined) {
+        fail(results, `[${pluginName}] gemini agents/${f} must have name and description in frontmatter`);
+        allValid = false;
+      }
+    }
+  }
+
+  const hooksJson = path.join(pluginDir, "hooks", "hooks.json");
+  // If a Gemini hooks.json exists, sanity-check it's at least valid JSON with a `hooks` root.
+  if (fs.existsSync(hooksJson)) {
+    let parsed: unknown;
+    try {
+      parsed = readJson(hooksJson);
+    } catch {
+      fail(results, `[${pluginName}] hooks/hooks.json is not valid JSON`);
+      allValid = false;
+      parsed = undefined;
+    }
+    if (parsed !== undefined) {
+      if (typeof parsed !== "object" || parsed === null || !("hooks" in parsed)) {
+        fail(results, `[${pluginName}] hooks/hooks.json must have a top-level "hooks" key`);
+        allValid = false;
+      }
+    }
+  }
+
+  const skillsDir = path.join(pluginDir, "skills");
+  if (!fs.existsSync(skillsDir)) {
+    fail(results, `[${pluginName}] gemini-extension.json expects skills/ directory on disk (missing)`);
+    allValid = false;
+  }
+
+  if (allValid) {
+    pass(results, `[${pluginName}] gemini-extension.json cross-references are valid`);
+  }
+}
+
 export function validatePowerMdFrontmatter(pluginDir: string, pluginName: string, results: ValidationResult): void {
   const powerPath = path.join(pluginDir, "POWER.md");
   if (!fileExists(powerPath)) return;
@@ -621,11 +946,14 @@ function main(): void {
     validateManifestFileRefs(pluginDir, pluginName, results);
     validateAgentFrontmatter(pluginDir, pluginName, results);
     validateClaudeHooks(pluginDir, pluginName, results);
+    validateCodexManifest(pluginDir, pluginName, results);
+    validateGeminiExtension(pluginDir, pluginName, results);
     validatePowerMdFrontmatter(pluginDir, pluginName, results);
   }
 
   validateMarketplace(CLAUDE_MARKETPLACE, pluginNames, ".claude-plugin/marketplace.json", results);
   validateMarketplace(CURSOR_MARKETPLACE, pluginNames, ".cursor-plugin/marketplace.json", results);
+  validateCodexMarketplace(CODEX_MARKETPLACE, pluginNames, ".agents/plugins/marketplace.json", results);
 
   printResults(results);
 

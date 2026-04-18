@@ -5,7 +5,15 @@
  * For each plugin in plugins/, finds hooks/*.yaml files and writes corresponding hooks/*.json files.
  * Only YAML sources are committed to git; JSON files are generated and gitignored.
  *
+ * A Claude-source YAML (typically hooks/claude.yaml) is emitted once for each of the
+ * supported target formats:
+ *
+ *   - `claude` target → hooks/claude.json (Claude Code's native tool names, e.g. "Write")
+ *   - `gemini` target → hooks/hooks.json (Gemini CLI native tool names, e.g. "write_file")
+ *
  * Usage: pnpm run build:hooks
+ *
+ * @see https://geminicli.com/docs/extensions/reference/ — Gemini CLI hooks format
  */
 
 import * as fs from "node:fs";
@@ -17,7 +25,109 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const PLUGINS_DIR = path.join(ROOT, "plugins");
 
-function buildHooksForPlugin(pluginDir: string, pluginName: string): number {
+export type HookTarget = "claude" | "gemini";
+
+/**
+ * Claude Code → Gemini CLI tool-name translations.
+ * When emitting a Gemini-format hooks file, any `matcher: <ClaudeTool>` entry
+ * is rewritten to the corresponding Gemini tool name.
+ */
+const CLAUDE_TO_GEMINI_TOOL_MATCHERS: Record<string, string> = {
+  Read: "read_file",
+  Write: "write_file",
+  Edit: "replace",
+  Glob: "glob",
+  Grep: "search_file_content",
+  Bash: "run_shell_command",
+  Agent: "activate_skill",
+};
+
+interface HookEntry {
+  type?: string;
+  command?: string;
+  [key: string]: unknown;
+}
+
+interface HookMatcher {
+  matcher?: string;
+  description?: string;
+  hooks?: HookEntry[];
+  [key: string]: unknown;
+}
+
+interface HooksFile {
+  hooks?: Record<string, HookMatcher[]>;
+  [key: string]: unknown;
+}
+
+function isHooksFile(value: unknown): value is HooksFile {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Deep-clone a hooks object and translate `matcher` tool names from Claude to Gemini.
+ * Entries whose matcher has no Gemini equivalent are preserved unchanged (the
+ * matcher string may be a glob pattern or non-tool identifier).
+ */
+function translateHooksForGemini(source: HooksFile): HooksFile {
+  const cloned = JSON.parse(JSON.stringify(source)) as HooksFile;
+  const hooks = cloned.hooks;
+  if (!hooks) return cloned;
+  for (const event of Object.keys(hooks)) {
+    const matchers = hooks[event];
+    if (!Array.isArray(matchers)) continue;
+    for (const m of matchers) {
+      if (typeof m.matcher === "string") {
+        const translated = CLAUDE_TO_GEMINI_TOOL_MATCHERS[m.matcher];
+        if (translated !== undefined) {
+          m.matcher = translated;
+        }
+      }
+    }
+  }
+  return cloned;
+}
+
+/**
+ * Convert a single hooks YAML file for the given plugin to the requested target format.
+ * Returns the output file basename (e.g. "claude.json" or "hooks.json") on success.
+ */
+export function convertHookFile(
+  hooksDir: string,
+  yamlFile: string,
+  target: HookTarget,
+): string {
+  const yamlPath = path.join(hooksDir, yamlFile);
+  const content = fs.readFileSync(yamlPath, "utf-8");
+  const parsed: unknown = parseYaml(content);
+  if (!isHooksFile(parsed)) {
+    throw new Error(`${yamlPath}: expected top-level object with optional "hooks" key`);
+  }
+
+  if (target === "claude") {
+    const outputName = yamlFile.replace(/\.ya?ml$/, ".json");
+    const outputPath = path.join(hooksDir, outputName);
+    fs.writeFileSync(outputPath, JSON.stringify(parsed, null, 2) + "\n", "utf-8");
+    return outputName;
+  }
+
+  // Gemini CLI canonically looks for `hooks/hooks.json`, regardless of source filename.
+  const geminiShape = translateHooksForGemini(parsed);
+  const outputName = "hooks.json";
+  const outputPath = path.join(hooksDir, outputName);
+  fs.writeFileSync(outputPath, JSON.stringify(geminiShape, null, 2) + "\n", "utf-8");
+  return outputName;
+}
+
+/**
+ * Build all hook JSON files for a single plugin. Emits one JSON file per target format
+ * for each YAML source found. Returns the number of output files produced.
+ */
+export function buildHooksForPlugin(
+  pluginDir: string,
+  pluginName: string,
+  targets: HookTarget[] = ["claude", "gemini"],
+): number {
   const hooksDir = path.join(pluginDir, "hooks");
   if (!fs.existsSync(hooksDir)) return 0;
 
@@ -27,16 +137,11 @@ function buildHooksForPlugin(pluginDir: string, pluginName: string): number {
 
   let count = 0;
   for (const yamlFile of yamlFiles) {
-    const yamlPath = path.join(hooksDir, yamlFile);
-    const jsonFile = yamlFile.replace(/\.ya?ml$/, ".json");
-    const jsonPath = path.join(hooksDir, jsonFile);
-
-    const content = fs.readFileSync(yamlPath, "utf-8");
-    const parsed: unknown = parseYaml(content);
-    fs.writeFileSync(jsonPath, JSON.stringify(parsed, null, 2) + "\n", "utf-8");
-
-    console.log(`  ${pluginName}/hooks/${yamlFile} → ${jsonFile}`);
-    count++;
+    for (const target of targets) {
+      const outputName = convertHookFile(hooksDir, yamlFile, target);
+      console.log(`  ${pluginName}/hooks/${yamlFile} → ${outputName} (${target})`);
+      count++;
+    }
   }
 
   return count;

@@ -159,7 +159,7 @@ function buildGeminiStandalone(pluginDir: string, destDir: string): string[] {
   // Rewrite agent tool names from Claude Code → Gemini CLI equivalents
   rewriteGeminiAgentTools(path.join(destDir, "agents"));
 
-  // commands: only .toml files
+  // commands: only .toml files (Gemini uses TOML for commands)
   const commandsSrc = path.join(pluginDir, "commands");
   const commandsDest = path.join(destDir, "commands");
   if (fs.existsSync(commandsSrc)) {
@@ -171,6 +171,22 @@ function buildGeminiStandalone(pluginDir: string, destDir: string): string[] {
       }
       copied.push("commands/ (.toml only)");
     }
+  }
+
+  // hooks/hooks.json: Gemini CLI native hooks format
+  const hooksJsonSrc = path.join(pluginDir, "hooks", "hooks.json");
+  const hooksJsonDest = path.join(destDir, "hooks", "hooks.json");
+  if (fs.existsSync(hooksJsonSrc)) {
+    copyFile(hooksJsonSrc, hooksJsonDest);
+    copied.push("hooks/hooks.json");
+  }
+
+  // policies/: Gemini CLI policy TOML files (if present)
+  const policiesSrc = path.join(pluginDir, "policies");
+  const policiesDest = path.join(destDir, "policies");
+  if (fs.existsSync(policiesSrc) && fs.statSync(policiesSrc).isDirectory()) {
+    copyDir(policiesSrc, policiesDest);
+    copied.push("policies/");
   }
 
   return copied;
