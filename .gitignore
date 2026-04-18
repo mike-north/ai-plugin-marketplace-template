@@ -149,3 +149,10 @@ vite.config.ts.timestamp-*
 # Build output (dist/ is committed for consumer install — see .gitattributes)
 dist-ts/
 plugins/*/hooks/*.json
+
+# Scratch & manual-test artifacts
+scratch/
+.DS_Store
+
+# Claude Code local configuration (auto-added)
+.claude/*.local.*
